@@ -1,0 +1,4 @@
+com\xuvigan\antifarmdrop\api\DropBlockedEvent$BlockReason.class
+com\xuvigan\antifarmdrop\AntiFarmDropPlugin.class
+com\xuvigan\antifarmdrop\AntiFarmDropPlugin$FallTracker.class
+com\xuvigan\antifarmdrop\api\DropBlockedEvent.class
