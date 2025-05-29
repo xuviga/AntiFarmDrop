@@ -13,133 +13,124 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.*;
 
-public class AntiFarmDropPlugin extends JavaPlugin implements Listener  {
+public class AntiFarmDropPlugin extends JavaPlugin implements Listener {
 
-    private final Map<UUID, Double> lastFallY = new HashMap<>();
+    private static AntiFarmDropPlugin instance;
+    public static AntiFarmDropPlugin getInstance() {
+        return instance;
+    }
+
+    private final Map<UUID, Double> fallStartY = new HashMap<>();
     private final Map<UUID, Long> fallStartTime = new HashMap<>();
-    private final Map<UUID, Long> lastPlayerAttackTime = new HashMap<>();
+    private final Map<UUID, Long> lastPlayerHit = new HashMap<>();
     private final Map<UUID, UUID> lastAttacker = new HashMap<>();
     private final Set<UUID> suspicious = new HashSet<>();
 
     private double minFallHeight;
     private long maxTrackTime;
-    private Set<EntityType> excludedTypes;
+    private Set<EntityType> excludedEntities;
     private Set<EntityDamageEvent.DamageCause> blockedCauses;
     private boolean logBlocked;
-
-    private static AntiFarmDropPlugin instance;
-
-    public static AntiFarmDropPlugin getInstance() {
-        return instance;
-    }
 
     @Override
     public void onEnable() {
         instance = this;
         saveDefaultConfig();
-        loadConfig();
-
+        loadSettings();
         Bukkit.getPluginManager().registerEvents(this, this);
-        new FallTracker().runTaskTimer(this, 1L, 2L);
-        getLogger().info("✅ AntiFarmDrop активен.");
+        new FallTracker().runTaskTimer(this, 2L, 2L);
+        getLogger().info("✅ AntiFarmDrop запущен.");
     }
 
     @Override
     public void onDisable() {
         instance = null;
-        lastFallY.clear();
-        fallStartTime.clear();
-        lastPlayerAttackTime.clear();
-        lastAttacker.clear();
         suspicious.clear();
+        fallStartY.clear();
+        fallStartTime.clear();
+        lastPlayerHit.clear();
+        lastAttacker.clear();
         getLogger().info("❌ AntiFarmDrop отключен.");
     }
 
-    private void loadConfig() {
-        FileConfiguration config = getConfig();
-        minFallHeight = config.getDouble("min-fall-height", 2.0);
-        maxTrackTime = config.getLong("max-track-time", 15000L);
-        logBlocked = config.getBoolean("log-blocked-drops", false);
-        blockedCauses = loadEnumSet(config.getStringList("blocked-damage-causes"), EntityDamageEvent.DamageCause.class, "DamageCause");
-        excludedTypes = loadEnumSet(config.getStringList("excluded-entities"), EntityType.class, "EntityType");
+    private void loadSettings() {
+        FileConfiguration cfg = getConfig();
+        minFallHeight = cfg.getDouble("min-fall-height", 2.0);
+        maxTrackTime = cfg.getLong("max-track-time", 15000L);
+        logBlocked = cfg.getBoolean("log-blocked-drops", true);
+        blockedCauses = parseEnumList(cfg.getStringList("blocked-damage-causes"), EntityDamageEvent.DamageCause.class);
+        excludedEntities = parseEnumList(cfg.getStringList("excluded-entities"), EntityType.class);
     }
 
-    private <E extends Enum<E>> Set<E> loadEnumSet(List<String> names, Class<E> enumClass, String label) {
-        Set<E> result = EnumSet.noneOf(enumClass);
-        for (String name : names) {
+    private <T extends Enum<T>> Set<T> parseEnumList(List<String> list, Class<T> clazz) {
+        Set<T> result = EnumSet.noneOf(clazz);
+        for (String val : list) {
             try {
-                result.add(Enum.valueOf(enumClass, name.toUpperCase()));
+                result.add(Enum.valueOf(clazz, val.toUpperCase()));
             } catch (IllegalArgumentException e) {
-                getLogger().warning("⚠️ Неизвестный " + label + ": " + name);
+                getLogger().warning("⚠️ Неизвестный тип: " + val);
             }
         }
         return result;
     }
 
     @EventHandler
-    public void onEntityDamage(EntityDamageEvent event) {
-        if (!(event.getEntity() instanceof LivingEntity entity)) return;
-        if (excludedTypes.contains(entity.getType())) return;
-        if (event instanceof EntityDamageByEntityEvent) return;
-        if (!blockedCauses.contains(event.getCause())) return;
+    public void onDamage(EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof LivingEntity entity)) return;
+        if (excludedEntities.contains(entity.getType())) return;
+        if (e instanceof EntityDamageByEntityEvent) return;
+        if (!blockedCauses.contains(e.getCause())) return;
+
         AttributeInstance attr = entity.getAttribute(Attribute.MAX_HEALTH);
         if (attr == null) return;
-        double maxHealth = attr.getValue();
-        double healthAfter = entity.getHealth() - event.getFinalDamage();
-        if (healthAfter > 0 && healthAfter <= maxHealth * 0.25) {
+
+        double remaining = entity.getHealth() - e.getFinalDamage();
+        if (remaining > 0 && remaining <= attr.getValue() * 0.25) {
             suspicious.add(entity.getUniqueId());
         }
     }
 
     @EventHandler
-    public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
-        if (!(event.getEntity() instanceof LivingEntity target)) return;
-        if (excludedTypes.contains(target.getType())) return;
-        Entity damager = event.getDamager();
-        if (damager instanceof Player player) {
-            UUID targetId = target.getUniqueId();
-            lastPlayerAttackTime.put(targetId, System.currentTimeMillis());
-            lastAttacker.put(targetId, player.getUniqueId());
+    public void onHit(EntityDamageByEntityEvent e) {
+        if (!(e.getEntity() instanceof LivingEntity entity)) return;
+        if (excludedEntities.contains(entity.getType())) return;
+        if (e.getDamager() instanceof Player player) {
+            UUID id = entity.getUniqueId();
+            lastPlayerHit.put(id, System.currentTimeMillis());
+            lastAttacker.put(id, player.getUniqueId());
         }
     }
 
     @EventHandler
-    public void onEntityDeath(EntityDeathEvent event) {
-        LivingEntity entity = event.getEntity();
-        if (entity == null || !entity.isValid()) return;
-        Location deathLocation = entity.getLocation();
-        if (deathLocation == null || deathLocation.getWorld() == null) return;
-        UUID entityId = entity.getUniqueId();
-        boolean wasSuspicious = suspicious.remove(entityId);
-        Long fallStart = fallStartTime.remove(entityId);
-        Long lastAttack = lastPlayerAttackTime.remove(entityId);
-        Double fallStartY = lastFallY.remove(entityId);
-        UUID attackerId = lastAttacker.remove(entityId);
-        double deathY = deathLocation.getY();
-        double fallHeight = (fallStartY != null && deathY != 0) ? (fallStartY - deathY) : 0;
+    public void onDeath(EntityDeathEvent e) {
+        LivingEntity entity = e.getEntity();
+        UUID id = entity.getUniqueId();
+
+        Double yStart = fallStartY.remove(id);
+        Long fallTime = fallStartTime.remove(id);
+        Long hitTime = lastPlayerHit.remove(id);
+        UUID attackerId = lastAttacker.remove(id);
+        boolean isSuspicious = suspicious.remove(id);
+
+        double fallHeight = yStart != null ? yStart - entity.getLocation().getY() : 0;
         boolean fellFar = fallHeight >= minFallHeight;
-        boolean allowDrop = true;
-        if (fellFar || wasSuspicious) {
-            allowDrop = (fallStart != null && lastAttack != null && lastAttack < fallStart);
+
+        boolean allow = true;
+        if (fellFar || isSuspicious) {
+            allow = hitTime != null && fallTime != null && hitTime < fallTime;
         }
-        if (!allowDrop) {
-            DropBlockedEvent.BlockReason reason = fellFar ?
-                    DropBlockedEvent.BlockReason.FALL :
-                    DropBlockedEvent.BlockReason.SUSPICIOUS_DAMAGE;
-            OfflinePlayer attacker = (attackerId != null) ? Bukkit.getOfflinePlayer(attackerId) : null;
-            DropBlockedEvent dropEvent = new DropBlockedEvent(entity, reason, attacker);
-            Bukkit.getPluginManager().callEvent(dropEvent);
-            if (dropEvent.isCancelled()) return;
-            event.getDrops().clear();
-            event.setDroppedExp(0);
-            if (logBlocked) {
-                getLogger().warning(String.format(
-                        "⛔ Дроп заблокирован у %s (высота: %.2f, упал: %s, подозрительный: %s)",
-                        entity.getType(), fallHeight, fellFar, wasSuspicious
-                ));
-                if (attackerId != null) {
-                    String name = (attacker != null && attacker.getName() != null) ? attacker.getName() : "Неизвестно";
-                    getLogger().info("📛 Последний атакующий игрок: " + name + " (" + attackerId + ")");
+
+        if (!allow) {
+            DropBlockedEvent.BlockReason reason = fellFar ? DropBlockedEvent.BlockReason.FALL : DropBlockedEvent.BlockReason.SUSPICIOUS_DAMAGE;
+            DropBlockedEvent event = new DropBlockedEvent(entity, reason, attackerId != null ? Bukkit.getOfflinePlayer(attackerId) : null);
+            Bukkit.getPluginManager().callEvent(event);
+            if (!event.isCancelled()) {
+                e.getDrops().clear();
+                e.setDroppedExp(0);
+                if (logBlocked) {
+                    getLogger().warning("⛔ Дроп заблокирован: " + entity.getType() +
+                            " (высота: " + String.format("%.2f", fallHeight) +
+                            ", упал: " + fellFar + ", подозрительный: " + isSuspicious + ")");
                 }
             }
         }
@@ -148,52 +139,28 @@ public class AntiFarmDropPlugin extends JavaPlugin implements Listener  {
     private class FallTracker extends BukkitRunnable {
         @Override
         public void run() {
-            final long now = System.currentTimeMillis();
+            long now = System.currentTimeMillis();
             for (World world : Bukkit.getWorlds()) {
-                if (world == null || !world.isChunkLoaded(world.getSpawnLocation().getBlockX() >> 4, world.getSpawnLocation().getBlockZ() >> 4)) continue;
                 for (LivingEntity entity : world.getLivingEntities()) {
-                    if (!shouldTrack(entity)) continue;
-                    UUID uuid = entity.getUniqueId();
-                    if (entity.getFallDistance() > 0 && !lastFallY.containsKey(uuid)) {
-                        double y = safeGetY(entity);
-                        if (y != -999) {
-                            lastFallY.put(uuid, y);
-                            fallStartTime.put(uuid, now);
-                        } else if (logBlocked) {
-                            getLogger().warning("⚠️ Не удалось получить Y-координату падения у " + entity.getType() + " (" + uuid + ")");
-                        }
+                    if (!(entity instanceof Mob) || entity.isDead() || excludedEntities.contains(entity.getType())) continue;
+                    UUID id = entity.getUniqueId();
+                    if (entity.getFallDistance() > 0 && !fallStartY.containsKey(id)) {
+                        fallStartY.put(id, entity.getLocation().getY());
+                        fallStartTime.put(id, now);
                     }
                 }
             }
-            Bukkit.getScheduler().runTaskAsynchronously(AntiFarmDropPlugin.this, this::cleanupExpiredEntries);
-        }
-        private boolean shouldTrack(LivingEntity entity) {
-            return entity != null &&
-                    entity.isValid() &&
-                    !entity.isDead() &&
-                    entity instanceof Mob &&
-                    !excludedTypes.contains(entity.getType());
-        }
-        private double safeGetY(LivingEntity entity) {
-            try {
-                Location loc = entity.getLocation();
-                if (loc.getWorld() == null) return -999;
-                return loc.getY();
-            } catch (Exception e) {
-                return -999;
-            }
-        }
-        private void cleanupExpiredEntries() {
-            final long threshold = System.currentTimeMillis() - maxTrackTime;
-            fallStartTime.entrySet().removeIf(entry -> entry.getValue() < threshold);
-            lastFallY.keySet().removeIf(uuid -> !fallStartTime.containsKey(uuid));
-            lastPlayerAttackTime.entrySet().removeIf(entry -> entry.getValue() < threshold);
-            lastAttacker.keySet().removeIf(uuid -> !lastPlayerAttackTime.containsKey(uuid));
+            Bukkit.getScheduler().runTaskAsynchronously(AntiFarmDropPlugin.this, () -> {
+                long expiry = System.currentTimeMillis() - maxTrackTime;
+                fallStartTime.entrySet().removeIf(e -> e.getValue() < expiry);
+                fallStartY.keySet().removeIf(id -> !fallStartTime.containsKey(id));
+                lastPlayerHit.entrySet().removeIf(e -> e.getValue() < expiry);
+                lastAttacker.keySet().removeIf(id -> !lastPlayerHit.containsKey(id));
+            });
         }
     }
 
     public static boolean isDropAllowed(Entity entity) {
-        return !AntiFarmDropPlugin.getInstance().suspicious.contains(entity.getUniqueId());
+        return !getInstance().suspicious.contains(entity.getUniqueId());
     }
-
 }

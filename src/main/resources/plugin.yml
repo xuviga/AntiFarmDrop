@@ -1,7 +1,7 @@
 name: AntiFarmDrop
 version: 1.0
 main: com.xuvigan.antifarmdrop.AntiFarmDropPlugin
-api-version: 1.20
+api-version: 1.21
 author: XuViGaN
 description: >
   AntiFarmDrop — это продвинутый плагин для защиты от фарма предметов и опыта,
